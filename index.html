@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f5f6b">
+<meta name="robots" content="noindex">
+<title>ניהול מניות</title>
+<!--
+  The admin's panel on the phone. It holds no secrets itself: after pairing, the phone keeps
+  its own signing key and the channel names in this browser only. It talks to the programs
+  through ntfy, so it works even when the admin's computer is off.
+-->
+<style>
+:root{--bg:#f5f6f4;--surface:#fff;--muted:#eef0ec;--text:#1c2321;--soft:#55605b;--line:#dde1db;--accent:#1f5f6b;--accent-soft:#e0eef0;--up:#17754a;--up-soft:#e3f3ea;--down:#b23a3a;--down-soft:#fbeaea;--warn:#7a5300;--on:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#121211;--surface:#1a1a19;--muted:#262624;--text:#f0efec;--soft:#b8b7ad;--line:#3a3a37;--accent:#6cc0d0;--accent-soft:#1d3a40;--up:#5fd29b;--up-soft:#173026;--down:#f19a95;--down-soft:#3b1f1e;--warn:#efc56e;--on:#101312}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,"Segoe UI",Arial,sans-serif;font-size:18px;line-height:1.5;padding-bottom:calc(84px + env(safe-area-inset-bottom))}
+header{position:sticky;top:0;z-index:5;background:var(--surface);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+header h1{font-size:22px;margin:0}
+.status{font-size:14px;color:var(--soft)}
+main{padding:16px;max-width:640px;margin:0 auto}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+h2{font-size:22px;margin:0 0 10px}
+h3{font-size:19px;margin:0 0 8px}
+p{margin:6px 0}
+.soft{color:var(--soft);font-size:15px}
+nav.tabs{position:fixed;bottom:0;inset-inline:0;z-index:5;background:var(--surface);border-top:1px solid var(--line);display:flex;padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+nav.tabs button{flex:1;border:0;background:none;color:var(--soft);font-size:13px;padding:6px 2px;border-radius:12px;display:flex;flex-direction:column;align-items:center;gap:2px}
+nav.tabs button span.icon{font-size:22px;line-height:1}
+nav.tabs button.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
+nav.tabs .badge{background:var(--down);color:#fff;border-radius:99px;padding:0 6px;font-size:12px;margin-inline-start:2px}
+button.btn{min-height:48px;border:2px solid var(--line);background:var(--surface);color:var(--text);font-size:17px;font-weight:600;border-radius:12px;padding:0 14px;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--on);font-weight:700}
+button:disabled{opacity:.55}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.chip{min-height:44px;border:2px solid var(--line);background:var(--surface);color:var(--text);border-radius:99px;padding:0 14px;font-size:16px;font-weight:600}
+.chip.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+textarea,input[type=text]{width:100%;font:inherit;color:var(--text);background:var(--surface);border:2px solid var(--line);border-radius:12px;padding:10px 12px}
+textarea:focus,input:focus{outline:none;border-color:var(--accent)}
+.label{font-weight:700;margin:10px 0 6px}
+.notice{position:fixed;top:64px;inset-inline:12px;z-index:9;border-radius:12px;padding:12px 14px;font-size:17px;box-shadow:0 4px 18px #0003}
+.notice.ok{background:var(--up-soft);color:var(--up)}
+.notice.err{background:var(--down-soft);color:var(--down)}
+.item{border:1px solid var(--line);border-radius:12px;margin-bottom:8px;overflow:hidden}
+.item summary{list-style:none;padding:12px;cursor:pointer}
+.item summary::-webkit-details-marker{display:none}
+.item .meta{font-size:14px;color:var(--soft)}
+.item .short{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item[open] .short{white-space:pre-wrap}
+.item .actions{border-top:1px solid var(--line);padding:10px;display:flex;flex-wrap:wrap;gap:8px}
+.dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--line);margin-inline-end:6px}
+.dot.on{background:var(--up)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid .btn{width:100%;min-height:64px}
+.code{font-size:28px;letter-spacing:4px;text-align:center;direction:ltr;text-transform:uppercase}
+.big{font-size:30px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header><h1>ניהול מניות</h1><span class="status" id="status"></span></header>
+<main id="app"></main>
+<nav class="tabs hidden" id="tabs"></nav>
+<div id="notice" class="notice hidden" role="status"></div>
+<script>
+"use strict";
+const NTFY = "https://ntfy.sh";
+const STORE = "stockPanel.v1";
+const ROUNDS = 210000;
+const ONLINE_MS = 75 * 60 * 1000;
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
+const unb64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const normalize = (code) => code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+let state = load();
+let tab = "suggestions";
+let ui = { to: null, delay: 0, level: "normal", speed: "normal", which: "random", emoji: "😂", sound: "trombone", sugTab: "new" };
+let signingKey = null;
+
+function load() {
+  try { return JSON.parse(localStorage.getItem(STORE)) || null; } catch { return null; }
+}
+function save() {
+  try { localStorage.setItem(STORE, JSON.stringify(state)); } catch {}
+}
+
+function notice(text, ok = true) {
+  const box = document.getElementById("notice");
+  box.textContent = text;
+  box.className = `notice ${ok ? "ok" : "err"}`;
+  clearTimeout(notice.timer);
+  notice.timer = setTimeout(() => (box.className = "notice hidden"), 3500);
+}
+
+/* ---------- pairing ---------- */
+
+async function pairTopic(code) {
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(normalize(code))));
+  return "stock-pair-" + [...hash].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+}
+
+async function pair(code) {
+  const clean = normalize(code);
+  if (clean.length !== 12) throw new Error("הקוד הוא 12 אותיות ומספרים");
+  const topic = await pairTopic(clean);
+  const text = await fetch(`${NTFY}/${topic}/json?poll=1&since=12h`).then((r) => r.text());
+  const events = text.split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((e) => e.event === "message");
+  if (!events.length) throw new Error("לא מצאנו את הקוד. אולי פג תוקפו (12 שעות). צור קוד חדש במחשב");
+  const box = JSON.parse(events.at(-1).message);
+  const base = await crypto.subtle.importKey("raw", enc.encode(clean), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: unb64(box.salt), iterations: ROUNDS, hash: "SHA-256" },
+    base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+  let parcel;
+  try {
+    parcel = JSON.parse(dec.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(box.iv) }, key, unb64(box.data))));
+  } catch {
+    throw new Error("הקוד לא נכון");
+  }
+  state = { ...parcel, contacts: {}, suggestions: {}, statuses: {}, revoked: false, pairedAt: Date.now() };
+  save();
+}
+
+function pairScreen(error) {
+  document.getElementById("tabs").className = "tabs hidden";
+  document.getElementById("status").textContent = "";
+  document.getElementById("app").innerHTML = `
+    <div class="card">
+      <h2>חיבור הטלפון</h2>
+      <p>במחשב, בלשונית ניהול ← מהטלפון ← "חיבור טלפון חדש", מופיע קוד. הקלד אותו כאן, פעם אחת בלבד.</p>
+      ${error ? `<p class="notice err" style="position:static;box-shadow:none">${esc(error)}</p>` : ""}
+      <input type="text" id="code" class="code" maxlength="14" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters">
+      <p></p>
+      <button class="btn primary" id="pairBtn" style="width:100%">חיבור</button>
+      <p class="soft">החיבור נשמר רק בדפדפן של הטלפון הזה. אם תמחק את נתוני הדפדפן, תצטרך קוד חדש.</p>
+    </div>`;
+  const button = document.getElementById("pairBtn");
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "מתחבר...";
+    try {
+      await pair(document.getElementById("code").value);
+      start();
+    } catch (error) {
+      pairScreen(error.message);
+    }
+  };
+}
+
+/* ---------- sending: signed with this phone's key ---------- */
+
+async function key() {
+  signingKey ??= await crypto.subtle.importKey("pkcs8", unb64(state.privateKey), { name: "Ed25519" }, false, ["sign"]);
+  return signingKey;
+}
+
+async function send(type, text, to = ui.to) {
+  const message = { id: crypto.randomUUID(), at: new Date().toISOString(), to: to || null, from: state.adminName, type, text };
+  const part = JSON.stringify([message.id, message.at, message.to, message.from, message.type, message.text, null, null]);
+  const sig = b64(await crypto.subtle.sign({ name: "Ed25519" }, await key(), enc.encode(part)));
+  const response = await fetch(`${NTFY}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic: state.messagesTopic, message: JSON.stringify({ v: 2, ...message, sig }) }),
+  });
+  if (!response.ok) throw new Error("לא נשלח. בדוק את האינטרנט");
+}
+
+async function act(label, fn) {
+  try {
+    await fn();
+    notice(label);
+  } catch (error) {
+    notice(error.message || "משהו השתבש", false);
+  }
+}
+
+/* ---------- reading: what the programs send back, and the admin's settings ---------- */
+
+async function poll(topic, since) {
+  const text = await fetch(`${NTFY}/${topic}/json?poll=1&since=${since}`).then((r) => r.text());
+  return text.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } })
+    .filter((e) => e && e.event === "message" && e.message);
+}
+
+async function adminKey() {
+  return crypto.subtle.importKey("spki", unb64(state.adminKey), { name: "Ed25519" }, false, ["verify"]);
+}
+
+async function refresh() {
+  try {
+    for (const event of await poll(state.repliesTopic, "12h")) {
+      let data;
+      try { data = JSON.parse(event.message); } catch { continue; }
+      if (!data || data.v !== 1 || typeof data.from !== "string" || !/^[0-9a-f-]{36}$/.test(data.from)) continue;
+      const at = event.time * 1000;
+      const contact = (state.contacts[data.from] ??= { lastSeen: 0 });
+      contact.lastSeen = Math.max(contact.lastSeen, at);
+      if (data.t === "presence") Object.assign(contact, { host: String(data.host ?? "").slice(0, 60), version: String(data.version ?? "").slice(0, 20), details: data.details });
+      if ((data.t === "suggestion" || data.t === "reply") && typeof data.text === "string" && !state.suggestions[data.id]) {
+        state.suggestions[data.id] = { from: data.from, text: data.text.slice(0, 2000), at };
+      }
+    }
+    // The admin's latest settings: the names, and whether this phone is still allowed.
+    const verifier = await adminKey();
+    for (const event of (await poll(state.messagesTopic, "24h")).reverse()) {
+      let data;
+      try { data = JSON.parse(event.message); } catch { continue; }
+      if (data?.v !== 2 || data.type !== "settings") continue;
+      const part = JSON.stringify([data.id, data.at, data.to ?? null, data.from ?? "", data.type, data.text ?? "", data.options ?? null, data.symbol ?? null]);
+      if (!(await crypto.subtle.verify({ name: "Ed25519" }, verifier, unb64(data.sig), enc.encode(part)))) continue;
+      const settings = JSON.parse(data.text);
+      if (settings.names) state.names = settings.names;
+      // Only a list sent after this phone was paired can cancel it.
+      if (Array.isArray(settings.phoneKeys) && Date.parse(data.at) > state.pairedAt) {
+        state.revoked = !settings.phoneKeys.includes(state.publicKey);
+      }
+      break;
+    }
+    save();
+    document.getElementById("status").textContent = "עודכן " + new Date().toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    document.getElementById("status").textContent = "אין חיבור";
+  }
+  render();
+}
+
+const nameOf = (id) => state.names?.[id] || state.contacts[id]?.host || "משתמש";
+const ago = (ms) => {
+  const minutes = Math.round((Date.now() - ms) / 60000);
+  if (minutes < 1) return "עכשיו";
+  if (minutes < 60) return `לפני ${minutes} דק׳`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `לפני ${hours} שע׳` : `לפני ${Math.round(hours / 24)} ימים`;
+};
+
+/* ---------- screens ---------- */
+
+const TABS = [
+  ["suggestions", "💡", "הצעות"],
+  ["message", "💬", "הודעה"],
+  ["trolls", "😜", "טרולים"],
+  ["tests", "🔔", "בדיקות"],
+  ["users", "👥", "משתמשים"],
+];
+
+function chips(name, options, current) {
+  return options.map(([value, label]) => `<button class="chip ${String(current) === String(value) ? "on" : ""}" data-set="${name}" data-value="${esc(value)}">${esc(label)}</button>`).join("");
+}
+
+function targets() {
+  const ids = Object.keys(state.contacts);
+  return `<div class="row"><b>למי:</b>${chips("to", [["", "כולם"], ...ids.map((id) => [id, nameOf(id)])], ui.to ?? "")}</div>`;
+}
+
+function suggestionsScreen() {
+  const all = Object.entries(state.suggestions).map(([id, s]) => ({ id, ...s, status: state.statuses[id] ?? "new" }))
+    .filter((s) => s.status === "new" || s.status === "todo").sort((a, b) => b.at - a.at);
+  const shown = all.filter((s) => s.status === ui.sugTab);
+  const count = (status) => all.filter((s) => s.status === status).length;
+  return `<div class="card"><h2>הצעות</h2>
+    <div class="row">${chips("sugTab", [["new", `חדשות (${count("new")})`], ["todo", `יבוצע (${count("todo")})`]], ui.sugTab)}</div><p></p>
+    ${shown.length === 0 ? `<p class="soft">${ui.sugTab === "new" ? "אין הצעות חדשות." : "אין הצעות ב\"יבוצע\"."}</p>` : shown.map((s) => `
+      <details class="item"><summary><div class="meta"><b>${esc(nameOf(s.from))}</b> · ${new Date(s.at).toLocaleString("he-IL", { dateStyle: "short", timeStyle: "short" })}</div>
+      <div class="short">${esc(s.text)}</div></summary>
+      <div class="actions">
+        <button class="btn" data-sug="${s.id}" data-status="done">✓ בוצע</button>
+        ${s.status === "new" ? `<button class="btn" data-sug="${s.id}" data-status="todo">📋 יבוצע</button>` : ""}
+        <button class="btn" data-sug="${s.id}" data-status="deleted">✕ לא לעשות</button>
+      </div></details>`).join("")}
+    <p class="soft">הרשימה כאן שמורה בטלפון. ההצעות מגיעות גם כשהמחשב כבוי.</p></div>`;
+}
+
+function messageScreen() {
+  return `<div class="card"><h2>הודעה על המסך</h2>${targets()}
+    <div class="label">ההודעה</div><textarea id="msg" rows="4" maxlength="1000" placeholder="למשל: שלום אבא!"></textarea><p></p>
+    <button class="btn primary" id="sendMsg" style="width:100%">שליחה</button>
+    <p class="soft">ההודעה קופצת עם צפצוף ונשארת עד שלוחצים "הבנתי". אם התוכנה סגורה, היא תופיע כשתיפתח (עד 12 שעות).</p></div>`;
+}
+
+const DELAYS = [[0, "מיד"], [10, "10 שנ׳"], [30, "30 שנ׳"], [60, "דקה"], [300, "5 דק׳"], [900, "רבע שעה"], [3600, "שעה"]];
+
+function trollsScreen() {
+  return `<div class="card"><h2>טרולים</h2>${targets()}<p></p>
+    <div class="row"><b>מתי:</b>${chips("delay", DELAYS, ui.delay)}</div>
+    <p class="soft">קורה רק אם התוכנה פתוחה אצלו כשזה מגיע.</p></div>
+    <div class="card"><h3>📉 המניה מתחילה לרדת</h3>
+      <div class="row">${chips("level", [["normal", "רגיל 3%"], ["lots", "הרבה 9%"], ["extreme", "מוגזם 25%"]], ui.level)}</div><p></p>
+      <div class="row"><b>כמה מהר:</b>${chips("speed", [["fast", "מהר"], ["normal", "רגיל"], ["slow", "לאט"], ["verySlow", "ממש לאט"]], ui.speed)}</div><p></p>
+      <div class="row">${chips("which", [["random", "מניה אחת"], ["all", "כל המניות"]], ui.which)}</div><p></p>
+      <button class="btn primary" data-troll='${JSON.stringify({ kind: "stockDrop" })}' style="width:100%">שליחה</button>
+      <p class="soft">בסוף קופץ "😜 עבדו עליך!" והמחיר חוזר לאמיתי. שום דבר לא נשמר.</p></div>
+    <div class="card"><div class="grid">
+      <button class="btn" data-troll='{"kind":"confetti"}'>🎉 קונפטי</button>
+      <button class="btn" data-troll='{"kind":"balloons"}'>🎈 בלונים</button>
+      <button class="btn" data-troll='{"kind":"shake"}'>🫨 רעידה</button>
+      <button class="btn" data-troll='{"kind":"flip"}'>🙃 ראש הפוך</button>
+    </div></div>
+    <div class="card"><h3>❤️ לב</h3><input type="text" id="heart" value="אוהב אותך" maxlength="60"><p></p>
+      <button class="btn primary" data-troll='{"kind":"heart"}' style="width:100%">שליחה</button></div>
+    <div class="card"><h3>🌧️ גשם אימוג׳ים</h3><div class="row">${chips("emoji", ["😂", "🚀", "🐸", "💩", "🍕", "💸", "🦆", "🔥"].map((e) => [e, e]), ui.emoji)}</div><p></p>
+      <button class="btn primary" data-troll='{"kind":"emoji"}' style="width:100%">שליחה</button></div>
+    <div class="card"><h3>🔊 צליל</h3><div class="row">${chips("sound", [["trombone", "טרומבון"], ["boing", "בוינג"], ["whistle", "שריקה"]], ui.sound)}</div><p></p>
+      <button class="btn primary" data-troll='{"kind":"sound"}' style="width:100%">שליחה</button></div>
+    <div class="card"><h3>😄 בדיחה</h3><textarea id="joke" rows="2" maxlength="300">למה המניה הלכה לרופא? כי היה לה לחץ... של מכירות.</textarea><p></p>
+      <button class="btn primary" data-troll='{"kind":"joke"}' style="width:100%">שליחה</button></div>`;
+}
+
+function testsScreen() {
+  return `<div class="card"><h2>בדיקות</h2>${targets()}<p></p><div class="grid">
+    <button class="btn" data-troll='{"kind":"testAlert"}'>🔔 התראה בתוכנה</button>
+    <button class="btn" data-troll='{"kind":"testPhone"}'>📱 הודעה לטלפון</button>
+    <button class="btn" data-troll='{"kind":"testVoice"}'>🗣️ הקול של העדכון</button>
+    <button class="btn" data-troll='{"kind":"testBeep"}'>🔊 ביפ</button></div>
+    <p class="soft">קורה בתוכנות שפתוחות עכשיו. הודעה לטלפון מגיעה רק למי שהפעיל אצלו התראות לטלפון.</p></div>`;
+}
+
+function usersScreen() {
+  const ids = Object.keys(state.contacts).sort((a, b) => state.contacts[b].lastSeen - state.contacts[a].lastSeen);
+  return `<div class="card"><h2>משתמשים</h2><button class="btn" id="ping">📡 מי מחובר עכשיו?</button><p></p>
+    ${ids.length === 0 ? `<p class="soft">עוד לא הגיע דיווח (נשמרים 12 שעות אחורה).</p>` : ids.map((id) => {
+      const c = state.contacts[id];
+      const online = Date.now() - c.lastSeen < ONLINE_MS;
+      return `<div class="item" style="padding:12px"><b><span class="dot ${online ? "on" : ""}"></span>${esc(nameOf(id))}</b>
+        <div class="meta">${online ? "פעיל" : "נראה " + ago(c.lastSeen)}${c.version ? ` · גרסה <bdi dir="ltr">${esc(c.version)}</bdi>` : ""}</div>
+        ${c.details ? `<div class="meta">${Number(c.details.stocks) || 0} מניות · ${Number(c.details.alerts) || 0} התראות · טלפון ${c.details.phone ? "מופעל" : "כבוי"}</div>` : ""}</div>`;
+    }).join("")}
+    <p class="soft">שמות משנים מהמחשב.</p></div>
+    <div class="card"><p class="soft">מחובר בתור: ${esc(state.phoneName)}</p>
+    <button class="btn" id="unpair">ניתוק הטלפון הזה</button></div>`;
+}
+
+function render() {
+  if (!state) return pairScreen();
+  if (state.revoked) {
+    localStorage.removeItem(STORE);
+    state = null;
+    return pairScreen("הטלפון הזה נותק מהמחשב. כדי לחבר אותו שוב צריך קוד חדש.");
+  }
+  const newCount = Object.keys(state.suggestions).filter((id) => (state.statuses[id] ?? "new") === "new").length;
+  const nav = document.getElementById("tabs");
+  nav.className = "tabs";
+  nav.innerHTML = TABS.map(([value, icon, label]) => `<button class="${tab === value ? "on" : ""}" data-tab="${value}"><span class="icon">${icon}</span>${label}${value === "suggestions" && newCount ? `<span class="badge">${newCount}</span>` : ""}</button>`).join("");
+  const keep = { msg: document.getElementById("msg")?.value, heart: document.getElementById("heart")?.value, joke: document.getElementById("joke")?.value };
+  document.getElementById("app").innerHTML = { suggestions: suggestionsScreen, message: messageScreen, trolls: trollsScreen, tests: testsScreen, users: usersScreen }[tab]();
+  for (const [id, value] of Object.entries(keep)) if (value !== undefined && document.getElementById(id)) document.getElementById(id).value = value;
+}
+
+document.addEventListener("click", async (event) => {
+  const el = event.target.closest("button");
+  if (!el) return;
+  if (el.dataset.tab) { tab = el.dataset.tab; render(); window.scrollTo(0, 0); return; }
+  if (el.dataset.set) {
+    const value = el.dataset.value;
+    ui[el.dataset.set] = el.dataset.set === "delay" ? Number(value) : el.dataset.set === "to" ? (value || null) : value;
+    render();
+    return;
+  }
+  if (el.dataset.sug) {
+    state.statuses[el.dataset.sug] = el.dataset.status;
+    save();
+    render();
+    return;
+  }
+  if (el.dataset.troll) {
+    const troll = JSON.parse(el.dataset.troll);
+    if (troll.kind === "stockDrop") Object.assign(troll, { level: ui.level, speed: ui.speed, which: ui.which });
+    if (troll.kind === "heart") troll.text = document.getElementById("heart").value;
+    if (troll.kind === "joke") troll.text = document.getElementById("joke").value;
+    if (troll.kind === "emoji") troll.emoji = ui.emoji;
+    if (troll.kind === "sound") troll.sound = ui.sound;
+    if (ui.delay && !troll.kind.startsWith("test")) troll.delaySec = ui.delay;
+    el.disabled = true;
+    await act(ui.delay && !troll.kind.startsWith("test") ? "נשלח. יתחיל בזמן שבחרת." : "נשלח.", () => send("troll", JSON.stringify(troll)));
+    el.disabled = false;
+    return;
+  }
+  if (el.id === "sendMsg") {
+    const text = document.getElementById("msg").value.trim();
+    if (!text) return notice("ההודעה ריקה", false);
+    el.disabled = true;
+    await act("ההודעה נשלחה.", async () => {
+      await send("text", text);
+      document.getElementById("msg").value = "";
+    });
+    el.disabled = false;
+  }
+  if (el.id === "ping") {
+    await act("שאלנו מי מחובר. בעוד כמה שניות הרשימה תתעדכן.", () => send("ping", "", null));
+    setTimeout(refresh, 5000);
+  }
+  if (el.id === "unpair" && confirm("לנתק את הטלפון הזה? כדי לחבר שוב צריך קוד חדש מהמחשב.")) {
+    localStorage.removeItem(STORE);
+    state = null;
+    render();
+  }
+});
+
+let timer = null;
+function start() {
+  render();
+  void refresh();
+  clearInterval(timer);
+  timer = setInterval(refresh, 20000);
+}
+
+(async () => {
+  if (!window.crypto?.subtle) {
+    document.getElementById("app").innerHTML = `<div class="card"><h2>הדפדפן ישן מדי</h2><p>פתח את הדף ב-Chrome או ב-Safari מעודכנים.</p></div>`;
+    return;
+  }
+  const fromLink = new URLSearchParams(location.hash.slice(1)).get("pair");
+  if (fromLink) {
+    history.replaceState(null, "", location.pathname);
+    document.getElementById("app").innerHTML = `<div class="card"><h2>מתחבר...</h2></div>`;
+    try {
+      await pair(fromLink);
+    } catch (error) {
+      return pairScreen(error.message);
+    }
+  }
+  if (state) start();
+  else pairScreen();
+})();
+</script>
+</body>
+</html>
